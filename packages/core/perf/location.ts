@@ -13,6 +13,7 @@ import { LayerNodePlatform } from "@opencode/util/effect/app-node-platform"
 import { AppNodeBuilder } from "../src/effect/app-node-builder"
 import { Bus } from "../src/bus"
 import { Database } from "../src/database/database"
+import { Flag } from "../src/flag"
 import { Integration } from "../src/integration"
 import { Location } from "../src/location"
 import { LocationServiceMap } from "../src/location-service-map"
@@ -119,7 +120,7 @@ export const keepPlugin = () =>
       const modelsDev = yield* ModelsDev.Service
       const directory = AbsolutePath.make(path.join(root, "plugins", `instance-${made++}`))
       const context = yield* Layer.build(
-        AppNodeBuilder.build(LayerNode.group([Provider.node, Model.node, Integration.node, Bus.node]), [
+        AppNodeBuilder.build(LayerNode.group([Provider.node, Model.node, Integration.node, Bus.node, Flag.node]), [
           Location.node.replace(
             Layer.succeed(Location.Service, Location.Service.of(location(Location.Ref.make({ directory })))),
           ),

@@ -117,8 +117,10 @@ const SourceModel = Schema.Struct({
     }),
   ),
   cost: Schema.optional(SourceCost),
-  // Ordered: the first API is the model's default.
+  // Ordered: the first API is the default unless the Location opts into the recommended API.
   api: Schema.Record(Schema.String, Schema.Unknown),
+  // A recommendation is only used if it matches a loadable entry. A malformed hint must not skip the model.
+  recommended_api: Schema.optional(Schema.Unknown),
   experimental: Schema.optional(
     Schema.Struct({ modes: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)) }),
   ),
@@ -186,49 +188,25 @@ const normalize = Effect.fnUntraced(function* (catalog: Record<string, unknown>)
     const item = Option.getOrUndefined(decodeProvider(value))
     if (!item) return []
     const providerID = Provider.ID.make(item.id)
-    const sources = Object.entries(item.models).flatMap(([key, value]) => {
+    const routes = Object.entries(item.models).flatMap(([key, value]) => {
       const decoded = decodeModel(value)
       if (Result.isFailure(decoded)) failed.push({ model: `${item.id}/${key}`, issue: decoded.failure })
       const model = Result.isSuccess(decoded) ? decoded.success : undefined
       // The fetch already asks for these types, but custom files and v1 catalogs may hold any type.
       const target = model && TYPES.includes(model.type) && route(providerID, model, unknown)
-      return model && target ? [{ model, route: target }] : []
+      return model && target ? [{ model, ...target }] : []
     })
-    if (sources.length === 0) return []
-    // v2 lists APIs per model, so the provider defaults are what most of its models use. A model that
-    // builds its own URL would inherit a provider baseURL, so then every model carries its own instead.
-    const packageName = mostCommon(sources.map((source) => source.route.package))
-    if (!packageName) return []
-    const urls = sources.map((source) => source.route.baseURL)
-    const baseURL = urls.every((url) => url !== undefined) ? mostCommon(urls) : undefined
-    const info = {
-      id: providerID,
-      name: item.name,
-      activation: "auto",
-      package: packageName,
-      ...(baseURL ? { settings: { baseURL } } : {}),
-    } satisfies Provider.Info
-    const models = sources.flatMap((source) => {
-      const baseCost = cost(source.model.cost)
-      const id = Model.ID.make(source.model.id)
-      const base = modelInfo(providerID, { packageName, baseURL }, id, source, { cost: baseCost })
-      const variants = Variant.resolve(
-        { ...base, package: source.route.package },
-        Variant.supports(source.model.capabilities.reasoning),
-      )
-      return [
-        { ...base, variants },
-        ...entries(source.model.experimental?.modes, decodeMode).map(([mode, options]) =>
-          modelInfo(providerID, { packageName, baseURL }, Model.ID.make(`${source.model.id}-${mode}`), source, {
-            name: `${source.model.name} ${mode.charAt(0).toUpperCase()}${mode.slice(1)}`,
-            cost: modeCost(source.model, baseCost, mode, options),
-            request: options,
-            variants,
-          }),
-        ),
-      ]
-    })
-    return [{ info, models, environment: [...item.env] }]
+    const first = providerSnapshot(providerID, item, routes)
+    if (!first) return []
+    // Recompute provider defaults only for providers with a different route.
+    const recommended = routes.some((source) => source.recommended)
+      ? providerSnapshot(
+          providerID,
+          item,
+          routes.map((source) => ({ model: source.model, route: source.recommended ?? source.route })),
+        )
+      : undefined
+    return [{ first, recommended }]
   })
   if (failed.length > 0)
     yield* Effect.logWarning("Skipped models.dev models that failed to parse", {
@@ -240,8 +218,55 @@ const normalize = Effect.fnUntraced(function* (catalog: Record<string, unknown>)
     yield* Effect.logDebug("Skipped models.dev APIs with entrypoints this build doesn't have", {
       entrypoints: [...unknown],
     })
-  return snapshots as readonly Snapshot[]
+  const first = snapshots.map((snapshot) => snapshot.first)
+  return {
+    first,
+    recommended: snapshots.some((snapshot) => snapshot.recommended)
+      ? snapshots.map((snapshot) => snapshot.recommended ?? snapshot.first)
+      : first,
+  }
 })
+
+function providerSnapshot(
+  providerID: Provider.ID,
+  provider: typeof SourceProvider.Type,
+  sources: readonly { readonly model: SourceModel; readonly route: Route }[],
+): Snapshot | undefined {
+  // v2 lists APIs per model, so the provider defaults are what most of its models use. A model that
+  // builds its own URL would inherit a provider baseURL, so then every model carries its own instead.
+  const packageName = mostCommon(sources.map((source) => source.route.package))
+  if (!packageName) return
+  const urls = sources.map((source) => source.route.baseURL)
+  const baseURL = urls.every((url) => url !== undefined) ? mostCommon(urls) : undefined
+  const info = {
+    id: providerID,
+    name: provider.name,
+    activation: "auto",
+    package: packageName,
+    ...(baseURL ? { settings: { baseURL } } : {}),
+  } satisfies Provider.Info
+  const models = sources.flatMap((source) => {
+    const baseCost = cost(source.model.cost)
+    const id = Model.ID.make(source.model.id)
+    const base = modelInfo(providerID, { packageName, baseURL }, id, source, { cost: baseCost })
+    const variants = Variant.resolve(
+      { ...base, package: source.route.package },
+      Variant.supports(source.model.capabilities.reasoning),
+    )
+    return [
+      { ...base, variants },
+      ...entries(source.model.experimental?.modes, decodeMode).map(([mode, options]) =>
+        modelInfo(providerID, { packageName, baseURL }, Model.ID.make(`${source.model.id}-${mode}`), source, {
+          name: `${source.model.name} ${mode.charAt(0).toUpperCase()}${mode.slice(1)}`,
+          cost: modeCost(source.model, baseCost, mode, options),
+          request: options,
+          variants,
+        }),
+      ),
+    ]
+  })
+  return { info, models, environment: [...provider.env] }
+}
 
 function entries<A>(record: Record<string, unknown> | undefined, decode: (input: unknown) => Option.Option<A>) {
   return Object.entries(record ?? {}).flatMap(([key, value]) =>
@@ -249,18 +274,35 @@ function entries<A>(record: Record<string, unknown> | undefined, decode: (input:
   )
 }
 
-function route(providerID: Provider.ID, model: SourceModel, unknown: Set<string>): Route | undefined {
-  // A chat model uses its first API with a package. Other types (image, decision…) only run through the
-  // opencode entrypoint for their type (`providers/<P>/images`) that this build can load, and are skipped
-  // without one: a chat entrypoint loads a chat model, which can't generate images or decisions.
+function route(providerID: Provider.ID, model: SourceModel, unknown: Set<string>) {
+  // A chat model uses its first loadable API unless the Location opts into its recommended API.
+  // Other types (image, decision…) need a native entrypoint for their type.
   const apis = entries(model.api, decodeApi).map(
     ([protocol, entry]) => [protocol, entry, loadable(entry.sdk?.opencodeai, unknown)] as const,
   )
-  const [protocol, api, opencodeai] =
-    (model.type === "chat"
-      ? apis.find(([, entry, opencodeai]) => opencodeai || entry.sdk?.aisdk)
-      : apis.find(([, , opencodeai]) => opencodeai?.endsWith(`/${model.type}s`))) ?? []
-  if (!protocol || !api) return undefined
+  const eligible = apis.filter(([, entry, opencodeai]) =>
+    model.type === "chat" ? opencodeai || entry.sdk?.aisdk : opencodeai?.endsWith(`/${model.type}s`),
+  )
+  const first = eligible[0]
+  if (!first) return
+  const selected =
+    model.recommended_api !== first[0] ? eligible.find(([protocol]) => protocol === model.recommended_api) : undefined
+  const route = apiRoute(providerID, model, ...first)
+  if (!route) return
+  return {
+    route,
+    recommended: selected && apiRoute(providerID, model, ...selected),
+  }
+}
+
+function apiRoute(
+  providerID: Provider.ID,
+  model: SourceModel,
+  protocol: string,
+  api: typeof SourceApi.Type,
+  opencodeai: string | undefined,
+): Route | undefined {
+  if (!protocol) return
   const aisdk = api.sdk?.aisdk
   const packageName =
     opencodeai ??
@@ -474,7 +516,7 @@ function modelInfo(
 export { Event } from "@opencode/schema/models-dev"
 
 export interface Interface {
-  readonly get: () => Effect.Effect<readonly Snapshot[]>
+  readonly get: (recommended?: boolean) => Effect.Effect<readonly Snapshot[]>
   readonly refresh: (force?: boolean) => Effect.Effect<void>
 }
 
@@ -507,7 +549,11 @@ const defaultSource = "https://models.opencode.ai"
 // The experimental v2 API, limited to the model types opencode keeps.
 export const catalogPath = `/experimental/v2.0/api.json?type=${TYPES.join(",")}`
 
-export const decodeSnapshot = (text: string) => decodeCatalog(text).pipe(Effect.flatMap(normalize))
+export const decodeSnapshot = (text: string) =>
+  decodeCatalog(text).pipe(
+    Effect.flatMap(normalize),
+    Effect.map((catalog) => catalog.first),
+  )
 
 // Bundled snapshot of the catalog at `catalogPath`, committed at
 // packages/core/src/models-dev/snapshot.txt and refreshed via
@@ -516,11 +562,12 @@ export const decodeSnapshot = (text: string) => decodeCatalog(text).pipe(Effect.
 // isolate: the snapshot is a multi-MB module-level constant and one isolate can
 // host many runtimes (Cloudflare colocates Durable Object instances), so
 // per-runtime decoding would multiply the cost.
-let bundledCache: readonly Snapshot[] | undefined
+let bundledCache: Effect.Success<ReturnType<typeof normalize>> | undefined
 const bundledSnapshot = Effect.suspend(() =>
   bundledCache
     ? Effect.succeed(bundledCache)
-    : decodeSnapshot(snapshotText).pipe(
+    : decodeCatalog(snapshotText).pipe(
+        Effect.flatMap(normalize),
         Effect.map((snapshot) => {
           bundledCache = snapshot
           return bundledCache
@@ -653,7 +700,7 @@ export const layer = (options?: Options) =>
         if (cached) return yield* normalize(cached.catalog)
         const bundled = yield* loadSnapshot
         if (bundled) return bundled
-        if (!fetch) return []
+        if (!fetch) return { first: [], recommended: [] }
         const catalog = yield* lock.withPermit(
           Effect.gen(function* () {
             const stored = options?.file ? undefined : yield* loadFromCache()
@@ -666,7 +713,8 @@ export const layer = (options?: Options) =>
 
       const [cachedGet, invalidate] = yield* Effect.cachedInvalidateWithTTL(populate, Duration.infinity)
 
-      const get = (): Effect.Effect<readonly Snapshot[]> => cachedGet
+      const get = (recommended = false) =>
+        cachedGet.pipe(Effect.map((catalog) => (recommended ? catalog.recommended : catalog.first)))
 
       const refresh = Effect.fn("ModelsDev.refresh")(function* (force = false) {
         yield* lock

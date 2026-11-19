@@ -7,6 +7,7 @@ import { Integration } from "@opencode/core/integration"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Bus } from "@opencode/core/bus"
+import { Flag } from "@opencode/core/flag"
 import { Location } from "@opencode/core/location"
 import { Model } from "@opencode/core/model"
 import { ModelsDev } from "@opencode/core/models-dev"
@@ -29,7 +30,7 @@ const locationLayer = Layer.succeed(
 const layer = AppNodeBuilder.build(LayerNode.group([Provider.node, Model.node, Integration.node, Bus.node]), [
   Location.node.replace(locationLayer),
 ])
-const it = testEffect(layer)
+const it = testEffect(Layer.merge(layer, Flag.testLayer()))
 const real = testEffect(PluginTestLayer)
 const isolated = testEffect(Layer.empty)
 const models = (file: string) =>
@@ -124,6 +125,37 @@ const richSnapshot = (name = "Acme") => {
 }
 
 describe("ModelsDevPlugin", () => {
+  isolated.effect("uses the Location's recommended API flag for provider defaults and model variants", () =>
+    Effect.gen(function* () {
+      const providerID = Provider.ID.make("acme")
+      const modelID = Model.ID.make("acme-1")
+      const source = yield* ModelsDev.Service
+      for (const enabled of [false, true]) {
+        const location = yield* owner
+        yield* ModelsDevPlugin.effect(location.host).pipe(
+          Effect.provideService(ModelsDev.Service, source),
+          Effect.provide(Flag.testLayer([], { overrides: enabled ? "recommended_api" : "-recommended_api" })),
+          Effect.provideContext(location.context),
+        )
+        yield* activate(location.providers)
+        const provider = required(yield* location.providers.get(providerID))
+        const model = required(yield* location.models.get(providerID, modelID))
+        const prefix = "https://api.acme.test/"
+        expect(provider.package).toBe(
+          enabled ? "@opencode/ai/providers/google/interactions" : "@opencode/ai/providers/google",
+        )
+        expect(provider.settings?.baseURL).toBe(prefix + (enabled ? "v1beta" : "v1"))
+        expect(model.variants.find((variant) => variant.id === "low")?.settings).toEqual(
+          enabled
+            ? { thinkingLevel: "low", thinkingSummaries: "auto" }
+            : { thinkingConfig: { includeThoughts: true, thinkingLevel: "low" } },
+        )
+        expect(model.capabilities.freeform).toEqual(enabled ? ["text"] : undefined)
+        expect(model.compatibility).toEqual(enabled ? { reasoningField: "thought" } : undefined)
+      }
+    }).pipe(Effect.provide(models(path.join(import.meta.dir, "fixtures", "models-dev.json")))),
+  )
+
   isolated.effect("shares definitions between Locations while provider and model edits own their copies", () =>
     Effect.gen(function* () {
       const { providerID, modelID, snapshot } = richSnapshot()
