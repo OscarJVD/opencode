@@ -14,6 +14,7 @@ export function scriptFileChanges(content: Content) {
   if (changes.has(content)) return changes.get(content)
 
   const files = content.state.metadata?.files
+
   const change: SessionMessageAssistantTool | undefined =
     Array.isArray(files) && files.length > 0
       ? {

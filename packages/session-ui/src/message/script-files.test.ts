@@ -4,15 +4,25 @@ import { withScriptFileChanges } from "./script-files"
 
 const files = [{ file: "src/app.ts", status: "modified", additions: 1, deletions: 1, patch: "@@" }]
 
-// SAFETY: only the fields scriptFileChanges reads; the rest of a tool part is irrelevant here.
-const script = (status: "completed" | "running", metadata: Record<string, unknown>) =>
-  ({
-    type: "tool",
-    id: "call_1",
-    name: "execute",
-    time: { created: 1 },
-    state: { status, input: { code: "" }, metadata, output: "", content: [] },
-  }) as unknown as SessionMessageAssistantTool
+const script = (
+  status: "completed" | "running",
+  metadata: { toolCalls?: []; files?: typeof files },
+): SessionMessageAssistantTool =>
+  status === "completed"
+    ? {
+        type: "tool",
+        id: "call_1",
+        name: "execute",
+        time: { created: 1 },
+        state: { status, input: { code: "" }, metadata, content: [{ type: "text", text: "" }] },
+      }
+    : {
+        type: "tool",
+        id: "call_1",
+        name: "execute",
+        time: { created: 1 },
+        state: { status, input: { code: "" }, metadata },
+      }
 
 describe("withScriptFileChanges", () => {
   test("follows a finished script with a patch call holding its files", () => {
