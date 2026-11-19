@@ -259,7 +259,7 @@ describe("ModelsDev Service", () => {
     }),
   )
 
-  it.live("takes each model's package from its recommended or first API and skips URLs packages build themselves", () =>
+  it.live("takes each model's package from its first API and skips URLs packages build themselves", () =>
     Effect.gen(function* () {
       const cache = makeCache()
       const azureAPI = (protocol: string, opencodeai: string) => ({
@@ -274,7 +274,6 @@ describe("ModelsDev Service", () => {
           models: {
             ...fixture.acme.models,
             "acme-responses": sourceModel("acme-responses", {
-              recommended_api: { protocol: "chat-completions" },
               api: {
                 responses: {
                   base_url: "https://api.acme.test/v1",
@@ -288,19 +287,6 @@ describe("ModelsDev Service", () => {
                 },
               },
             }),
-            "acme-recommended": sourceModel("acme-recommended", {
-              api: {
-                responses: {
-                  base_url: "https://api.acme.test/v1",
-                  sdk: { aisdk: "@ai-sdk/openai", opencodeai: "@opencode/ai/providers/openai/responses" },
-                },
-                "chat-completions": {
-                  base_url: "https://other.acme.test/v1",
-                  sdk: { aisdk: "@ai-sdk/openai-compatible", opencodeai: "@opencode/ai/providers/openai-compatible" },
-                },
-              },
-              recommended_api: "chat-completions",
-            }),
             "acme-fallback": sourceModel("acme-fallback", {
               api: {
                 messages: {
@@ -308,9 +294,7 @@ describe("ModelsDev Service", () => {
                   sdk: { aisdk: "@ai-sdk/anthropic" },
                   capabilities: { tools: { freeform: ["future-grammar"] } },
                 },
-                "chat-completions": { sdk: { opencodeai: "@opencode/ai/providers/future" } },
               },
-              recommended_api: "chat-completions",
             }),
           },
         },
@@ -335,38 +319,20 @@ describe("ModelsDev Service", () => {
         },
       })
       const state = yield* Ref.make(initialState)
-      const [[acme, azure], [recommended, recommendedAzure]] = yield* provided(
+      const [acme, azure] = yield* provided(
         state,
         cache,
-        ModelsDev.Service.use((service) => Effect.all([service.get(), service.get(true)])),
+        ModelsDev.Service.use((service) => service.get()),
       )
       const acmeModel = (id: string) => acme?.models.find((model) => model.id === id)
-      expect(acme?.info.package).toBe("@opencode/ai/providers/openai/responses")
-      expect(acme?.info.settings).toEqual({ baseURL: "https://api.acme.test/v1" })
-      expect(acmeModel("acme-responses")?.package).toBeUndefined()
+      expect(acmeModel("acme-responses")?.package).toBe("@opencode/ai/providers/openai/responses")
       expect(acmeModel("acme-responses")?.settings).toBeUndefined()
       expect(acmeModel("acme-responses")?.capabilities.freeform).toEqual(["text", "lark"])
       expect(acmeModel("acme-1")?.capabilities.freeform).toBeUndefined()
-      expect(acmeModel("acme-recommended")?.package).toBeUndefined()
-      expect(acmeModel("acme-recommended")?.settings).toBeUndefined()
-
-      expect(recommended?.info.package).toBe("@opencode/ai/providers/openai-compatible")
-      expect(recommended?.info.settings).toEqual({ baseURL: "https://api.acme.test/v1" })
-      const recommendedModel = recommended?.models.find((model) => model.id === "acme-recommended")
-      expect(recommendedModel?.package).toBeUndefined()
-      expect(recommendedModel?.settings).toEqual({
-        baseURL: "https://other.acme.test/v1",
-        provider: "acme",
-      })
-      expect(recommended?.models.find((model) => model.id === "acme-responses")?.package).toBe(
-        "@opencode/ai/providers/openai/responses",
-      )
-      expect(recommendedAzure).toBe(azure)
       // Without an opencode package, the AI SDK package maps to the native one as before.
       expect(acmeModel("acme-fallback")?.package).toBe("@opencode/ai/providers/anthropic")
       expect(acmeModel("acme-fallback")?.capabilities.freeform).toEqual([])
       expect(acmeModel("acme-fallback")?.settings).toEqual({ baseURL: "https://claude.acme.test/v1" })
-      expect(recommended?.models.find((model) => model.id === "acme-fallback")).toEqual(acmeModel("acme-fallback"))
 
       const azureModel = (id: string) => azure?.models.find((model) => model.id === id)
       expect(azure?.info.package).toBe("@opencode/ai/providers/azure/responses")

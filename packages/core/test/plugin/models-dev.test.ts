@@ -9,6 +9,7 @@ import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Bus } from "@opencode/core/bus"
 import { Config } from "@opencode/core/config"
+import { Credential } from "@opencode/core/credential"
 import { Flag } from "@opencode/core/flag"
 import { Location } from "@opencode/core/location"
 import { Model } from "@opencode/core/model"
@@ -30,9 +31,10 @@ const locationLayer = Layer.succeed(
   Location.Service,
   Location.Service.of(location({ directory: AbsolutePath.make(import.meta.dir) })),
 )
-const layer = AppNodeBuilder.build(LayerNode.group([Provider.node, Model.node, Integration.node, Bus.node]), [
-  Location.node.replace(locationLayer),
-])
+const layer = AppNodeBuilder.build(
+  LayerNode.group([Provider.node, Model.node, Integration.node, Bus.node, Credential.node]),
+  [Location.node.replace(locationLayer)],
+)
 const it = testEffect(Layer.merge(layer, Flag.testLayer()))
 const real = testEffect(PluginTestLayer)
 const isolated = testEffect(Layer.empty)
@@ -128,12 +130,12 @@ const richSnapshot = (name = "Acme") => {
 }
 
 describe("ModelsDevPlugin", () => {
-  isolated.effect("uses the Location's recommended API flag for provider defaults and model variants", () =>
-    Effect.gen(function* () {
-      const providerID = Provider.ID.make("acme")
-      const modelID = Model.ID.make("acme-1")
-      const source = yield* ModelsDev.Service
-      for (const enabled of [false, true]) {
+  for (const enabled of [true, false]) {
+    isolated.live(`uses the ${enabled ? "recommended" : "first"} API and its variants`, () =>
+      Effect.gen(function* () {
+        const providerID = Provider.ID.make("acme")
+        const modelID = Model.ID.make("acme-1")
+        const source = yield* ModelsDev.Service
         const location = yield* owner
         yield* ModelsDevPlugin.effect(location.host).pipe(
           Effect.provideService(ModelsDev.Service, source),
@@ -141,82 +143,48 @@ describe("ModelsDevPlugin", () => {
           Effect.provideContext(location.context),
         )
         yield* activate(location.providers)
-        const provider = required(yield* location.providers.get(providerID))
         const model = required(yield* location.models.get(providerID, modelID))
-        const prefix = "https://api.acme.test/"
-        expect(provider.package).toBe(
+        expect(model.package).toBe(
           enabled ? "@opencode/ai/providers/google/interactions" : "@opencode/ai/providers/google",
         )
-        expect(provider.settings?.baseURL).toBe(prefix + (enabled ? "v1beta" : "v1"))
+        expect(model.settings?.baseURL).toBe(`https://api.acme.test/${enabled ? "v1beta" : "v1"}`)
         expect(model.variants.find((variant) => variant.id === "low")?.settings).toEqual(
           enabled
             ? { thinkingLevel: "low", thinkingSummaries: "auto" }
             : { thinkingConfig: { includeThoughts: true, thinkingLevel: "low" } },
         )
-        expect(model.capabilities.freeform).toEqual(enabled ? ["text"] : undefined)
-        expect(model.compatibility).toEqual(enabled ? { reasoningField: "thought" } : undefined)
-      }
-    }).pipe(Effect.provide(models(path.join(import.meta.dir, "fixtures", "models-dev.json")))),
-  )
-
-  for (const entry of [
-    { location: "us-central1", enabled: true },
-    { location: "us", configured: "us-central1", enabled: true },
-    { location: "us", enabled: true, host: "aiplatform.us.rep.googleapis.com" },
-    { location: "eu", enabled: true, host: "aiplatform.eu.rep.googleapis.com" },
-    { location: "global", enabled: true, host: "aiplatform.googleapis.com" },
-    { location: undefined, enabled: true, host: "aiplatform.googleapis.com" },
-    { location: "us", enabled: false },
-    { location: "us-central1", enabled: false },
-  ]) {
-    isolated.live(
-      `routes Vertex with location=${entry.configured ?? entry.location} and recommended_api=${entry.enabled}${entry.configured ? " (configured)" : ""}`,
-      () =>
-        withEnv(
-          {
-            GOOGLE_VERTEX_PROJECT: "test-project",
-            GOOGLE_VERTEX_LOCATION: entry.location,
-            GOOGLE_CLOUD_LOCATION: undefined,
-            VERTEX_LOCATION: undefined,
-          },
-          () =>
-            Effect.gen(function* () {
-              const source = yield* ModelsDev.Service
-              const location = yield* owner
-              if (entry.configured)
-                yield* Context.get(location.context, Config.Test).setEntries([
-                  new Document({
-                    type: "document",
-                    info: Schema.decodeUnknownSync(Info)({
-                      providers: { "google-vertex": { settings: { location: entry.configured } } },
-                    }),
-                  }),
-                ])
-              yield* ModelsDevPlugin.effect(location.host).pipe(
-                Effect.provideService(ModelsDev.Service, source),
-                Effect.provide(
-                  Flag.testLayer([], { overrides: entry.enabled ? "recommended_api" : "-recommended_api" }),
-                ),
-                Effect.provideContext(location.context),
-              )
-              yield* GoogleVertexPlugin.effect(location.host).pipe(Effect.provideContext(location.context))
-
-              const providerID = Provider.ID.googleVertex
-              const model = required(yield* location.models.get(providerID, Model.ID.make("gemini-3.1-pro-preview")))
-              expect(model.package).toBe(
-                entry.host
-                  ? "@opencode/ai/providers/google-vertex/interactions"
-                  : "@opencode/ai/providers/google-vertex/gemini",
-              )
-              const resolved = entry.configured ?? entry.location ?? "global"
-              expect(model.settings?.location).toBe(resolved)
-              expect(model.settings?.baseURL).toBe(
-                entry.host && `https://${entry.host}/v1beta1/projects/test-project/locations/${resolved}`,
-              )
-            }).pipe(Effect.provide(models(path.join(import.meta.dir, "fixtures", "models-dev-google-vertex.json")))),
-        ),
+      }).pipe(Effect.provide(models(path.join(import.meta.dir, "fixtures", "models-dev.json")))),
     )
   }
+
+  isolated.live("keeps Vertex on its first API when config selects a single region", () =>
+    withEnv({ GOOGLE_VERTEX_PROJECT: "test-project", GOOGLE_VERTEX_LOCATION: "us" }, () =>
+      Effect.gen(function* () {
+        const source = yield* ModelsDev.Service
+        const location = yield* owner
+        yield* Context.get(location.context, Config.Test).setEntries([
+          new Document({
+            type: "document",
+            info: Schema.decodeUnknownSync(Info)({
+              experimental: { recommended_api: true },
+              providers: { "google-vertex": { settings: { location: "us-central1" } } },
+            }),
+          }),
+        ])
+        yield* ModelsDevPlugin.effect(location.host).pipe(
+          Effect.provideService(ModelsDev.Service, source),
+          Effect.provideContext(location.context),
+        )
+        yield* GoogleVertexPlugin.effect(location.host).pipe(Effect.provideContext(location.context))
+
+        const model = required(
+          yield* location.models.get(Provider.ID.googleVertex, Model.ID.make("gemini-3.1-pro-preview")),
+        )
+        expect(model.package).toBe("@opencode/ai/providers/google-vertex/gemini")
+        expect(model.settings?.baseURL).toBeUndefined()
+      }).pipe(Effect.provide(models(path.join(import.meta.dir, "fixtures", "models-dev-google-vertex.json")))),
+    ),
+  )
 
   isolated.effect("shares definitions between Locations while provider and model edits own their copies", () =>
     Effect.gen(function* () {

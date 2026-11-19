@@ -37,33 +37,6 @@
             }
           }
         }
-      },
-      "gemini-2.5-flash": {
-        "id": "gemini-2.5-flash",
-        "type": "chat",
-        "name": "Gemini 2.5 Flash",
-        "release_date": "2026-02-19",
-        "modalities": {
-          "input": ["text"],
-          "output": ["text"]
-        },
-        "capabilities": {
-          "tools": {
-            "supported": true
-          },
-          "reasoning": {
-            "supported": true,
-            "effort": ["low", "high"]
-          }
-        },
-        "api": {
-          "generate-content": {
-            "base_url": "https://${GOOGLE_VERTEX_ENDPOINT}/v1beta1/projects/${GOOGLE_VERTEX_PROJECT}/locations/${GOOGLE_VERTEX_LOCATION}/publishers/google",
-            "sdk": {
-              "opencodeai": "@opencode/ai/providers/google-vertex/gemini"
-            }
-          }
-        }
       }
     }
   }

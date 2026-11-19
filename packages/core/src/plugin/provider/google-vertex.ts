@@ -1,15 +1,14 @@
 import { Effect, Option, Schema, Stream } from "effect"
 import path from "node:path"
+import type { IntegrationDomain } from "@opencode/plugin/effect/integration"
 import { define } from "@opencode/plugin/effect/plugin"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { Bus } from "../../bus.js"
-import { Config } from "../../config.js"
-import { ConfigEntryObserver } from "../../config/plugin/entry-observer.js"
 import { Credential } from "../../credential.js"
+import type { ModelsDev } from "../../models-dev.js"
 import { Provider } from "../../provider.js"
-import { catalogWithoutRecommendation } from "../models-dev.js"
-import { configuredSettings, foldSettings } from "./configured.js"
+import { configuredSettings } from "./configured.js"
 
 const ADC_METHOD = "google-adc"
 
@@ -17,7 +16,7 @@ const decodeADCFile = Schema.decodeUnknownOption(
   Schema.fromJsonString(Schema.Struct({ quota_project_id: Schema.optional(Schema.String) })),
 )
 
-function resolveProject(options: Record<string, unknown>) {
+export function resolveProject(options: Record<string, unknown>) {
   // models.dev advertises GOOGLE_VERTEX_PROJECT for Vertex, while Google SDKs
   // and ADC examples commonly use the broader Google Cloud project aliases.
   const project =
@@ -29,7 +28,7 @@ function resolveProject(options: Record<string, unknown>) {
   return typeof project === "string" ? project : undefined
 }
 
-function resolveLocation(options: Record<string, unknown>) {
+export function resolveLocation(options: Record<string, unknown>) {
   const location =
     options.location ??
     process.env.GOOGLE_VERTEX_LOCATION ??
@@ -54,11 +53,33 @@ function replaceVertexVars(value: string, project: string | undefined, location:
     .replaceAll("${GOOGLE_VERTEX_ENDPOINT}", vertexEndpoint(location))
 }
 
+export function expandVertexCatalog(data: ModelsDev.Snapshot, project: string | undefined, location: string) {
+  const expand = <T extends { readonly settings?: Provider.Settings }>(info: T): T =>
+    typeof info.settings?.baseURL === "string"
+      ? {
+          ...info,
+          settings: { ...info.settings, baseURL: replaceVertexVars(info.settings.baseURL, project, location) },
+        }
+      : info
+  return { ...data, info: expand(data.info), models: data.models.map(expand) }
+}
+
+export const vertexCredentialSettings = Effect.fn("GoogleVertexPlugin.load")(function* (
+  integration: IntegrationDomain,
+) {
+  const credentials = yield* Credential.Service
+  const connection = yield* integration.connection.active(Provider.ID.googleVertex)
+  // Read the stored value without refreshing the connection.
+  const stored =
+    connection?.type === "credential" ? yield* credentials.get(Credential.ID.make(connection.id)) : undefined
+  if (stored?.value.type !== "external" || stored.value.methodID !== ADC_METHOD) return {}
+  return { project: stored.value.metadata?.project, location: stored.value.metadata?.location }
+})
+
 export const GoogleVertexPlugin = define({
   id: "opencode.provider.google.vertex",
   effect: Effect.fn(function* (ctx) {
     const fs = yield* FSUtil.Service
-    const credentials = yield* Credential.Service
     const bus = yield* Bus.Service
     const read = (file: string) => fs.readFileStringSafe(file).pipe(Effect.orElseSucceed(() => undefined))
     // Same lookup as gcloud itself. Only project IDs are read; nothing here contacts Google.
@@ -104,14 +125,7 @@ export const GoogleVertexPlugin = define({
       ]),
     )
 
-    const load = Effect.fn("GoogleVertexPlugin.load")(function* () {
-      const connection = yield* ctx.integration.connection.active(Provider.ID.googleVertex)
-      // Reads the stored value rather than resolving the connection, so startup never refreshes anything.
-      const stored =
-        connection?.type === "credential" ? yield* credentials.get(Credential.ID.make(connection.id)) : undefined
-      if (stored?.value.type !== "external" || stored.value.methodID !== ADC_METHOD) return {}
-      return { project: stored.value.metadata?.project, location: stored.value.metadata?.location }
-    })
+    const load = () => vertexCredentialSettings(ctx.integration)
     const selected = { settings: yield* load() }
     const settingsFor = (provider: { id: string; integrationID?: string; settings?: Record<string, unknown> }) => ({
       ...provider.settings,
@@ -165,8 +179,6 @@ export const GoogleVertexPlugin = define({
         },
       })
     })
-    const config = yield* Config.Service
-    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, ctx.provider.reload())
     yield* ctx.provider.transform((evt) => {
       for (const item of evt.list()) {
         if (
@@ -178,31 +190,20 @@ export const GoogleVertexPlugin = define({
         )
           continue
         const settings = settingsFor(item.provider)
-        const withoutInteractions =
-          item.provider.id === Provider.ID.googleVertex
-            ? catalogWithoutRecommendation(item.models, "interactions")
-            : undefined
-        const configured = withoutInteractions
-          ? (foldSettings(loaded.entries, item.provider.id, settings) ?? settings)
-          : settings
-        const project = resolveProject(configured)
-        const location = resolveLocation(configured) ?? "global"
-        // Interactions only serves global, us and eu: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/interactions#security-and-compliance
-        const fallback = ["global", "us", "eu"].includes(location) ? undefined : withoutInteractions
-        if (fallback) evt.models.set(item.provider.id, fallback.models)
+        const project = resolveProject(settings)
+        const location = resolveLocation(settings) ?? "global"
         evt.update(item.provider.id, (provider) => {
           // Vertex authenticates through ADC rather than a key credential, so a
           // resolvable project is what makes the provider usable.
           if (project && provider.activation === "auto") provider.activation = "enabled"
-          if (fallback) provider.package = fallback.info.package
-          const baseURL = (fallback ? fallback.info : provider).settings?.baseURL
           provider.settings = {
-            ...settings,
+            ...settingsFor(provider),
             ...(project ? { project } : {}),
             location,
-            ...(typeof baseURL === "string" ? { baseURL: replaceVertexVars(baseURL, project, location) } : {}),
+            ...(typeof provider.settings?.baseURL === "string"
+              ? { baseURL: replaceVertexVars(provider.settings.baseURL, project, location) }
+              : {}),
           }
-          if (fallback && baseURL === undefined) delete provider.settings.baseURL
         })
       }
     })
@@ -216,17 +217,12 @@ export const GoogleVertexPlugin = define({
           )
         )
           continue
+        const settings = settingsFor(item.provider)
+        const project = resolveProject(settings)
+        const location = resolveLocation(settings) ?? "global"
         for (const model of models.list(item.provider.id)) {
           if (typeof model.settings?.baseURL !== "string") continue
-          const settings =
-            (model.package ?? item.provider.package) === "@opencode/ai/providers/google-vertex/interactions"
-              ? (item.provider.settings ?? {})
-              : settingsFor(item.provider)
-          const baseURL = replaceVertexVars(
-            model.settings.baseURL,
-            resolveProject(settings),
-            resolveLocation(settings) ?? "global",
-          )
+          const baseURL = replaceVertexVars(model.settings.baseURL, project, location)
           models.update(item.provider.id, model.id, (draft) => {
             draft.settings = {
               ...draft.settings,

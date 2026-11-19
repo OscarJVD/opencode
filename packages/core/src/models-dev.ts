@@ -117,9 +117,8 @@ const SourceModel = Schema.Struct({
     }),
   ),
   cost: Schema.optional(SourceCost),
-  // Ordered: the first API is the default unless the Location opts into the recommended API.
+  // Ordered: the first API is the model's default.
   api: Schema.Record(Schema.String, Schema.Unknown),
-  // A recommendation is only used if it matches a loadable entry. A malformed hint must not skip the model.
   recommended_api: Schema.optional(Schema.Unknown),
   experimental: Schema.optional(
     Schema.Struct({ modes: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)) }),
@@ -152,10 +151,11 @@ export type Snapshot = {
   readonly info: Provider.Info
   readonly models: readonly Model.Info[]
   readonly environment: readonly string[]
-  readonly withoutRecommendation?: (protocol: string) => Snapshot | undefined
+  readonly recommend?: () => Snapshot | undefined
 }
 
 type Route = {
+  readonly protocol: string
   readonly package: string
   readonly freeform?: Model.Capabilities["freeform"]
   readonly baseURL?: string
@@ -189,46 +189,36 @@ const normalize = Effect.fnUntraced(function* (catalog: Record<string, unknown>)
     const item = Option.getOrUndefined(decodeProvider(value))
     if (!item) return []
     const providerID = Provider.ID.make(item.id)
-    const routes = Object.entries(item.models).flatMap(([key, value]) => {
+    const sources = Object.entries(item.models).flatMap(([key, value]) => {
       const decoded = decodeModel(value)
       if (Result.isFailure(decoded)) failed.push({ model: `${item.id}/${key}`, issue: decoded.failure })
       const model = Result.isSuccess(decoded) ? decoded.success : undefined
       // The fetch already asks for these types, but custom files and v1 catalogs may hold any type.
       const target = model && TYPES.includes(model.type) && route(providerID, model, unknown)
-      return model && target ? [{ model, ...target }] : []
+      return model && target ? [{ model, route: target }] : []
     })
-    const first = providerSnapshot(providerID, item, routes)
+    const first = providerSnapshot(providerID, item.name, item.env, sources)
     if (!first) return []
-    // Recompute provider defaults only for providers with a different route.
-    if (!routes.some((source) => source.recommended)) return [{ first, recommended: undefined }]
-    const recommended = providerSnapshot(
-      providerID,
-      item,
-      routes.map((source) => ({ model: source.model, route: source.recommended ?? source.route })),
-    )
-    const fallbacks = new Map<string, Snapshot | undefined>()
+    const hasRecommendation = (source: (typeof sources)[number]) =>
+      typeof source.model.recommended_api === "string" && source.model.recommended_api !== source.route.protocol
+    if (!sources.some(hasRecommendation)) return [first]
+    let recommended: Snapshot | false | undefined
     return [
       {
-        first,
-        recommended: recommended && {
-          ...recommended,
-          withoutRecommendation: (protocol: string) => {
-            if (fallbacks.has(protocol)) return fallbacks.get(protocol)
-            const remaining = routes.map((source) =>
-              source.model.recommended_api === protocol ? undefined : source.recommended,
-            )
-            const fallback = !routes.some((source, index) => source.recommended !== remaining[index])
-              ? undefined
-              : remaining.some(Boolean)
-                ? providerSnapshot(
-                    providerID,
-                    item,
-                    routes.map((source, index) => ({ model: source.model, route: remaining[index] ?? source.route })),
-                  )
-                : first
-            fallbacks.set(protocol, fallback)
-            return fallback
-          },
+        ...first,
+        // Only build alternate definitions for providers whose recommendations are requested.
+        recommend: () => {
+          if (recommended !== undefined) return recommended || undefined
+          const selected = sources.map((source) => {
+            if (!hasRecommendation(source)) return source
+            const target = route(providerID, source.model, unknown, true)
+            return target ? { model: source.model, route: target } : source
+          })
+          recommended =
+            (selected.some((source, index) => source !== sources[index]) &&
+              providerSnapshot(providerID, first.info.name, first.environment, selected)) ||
+            false
+          return recommended || undefined
         },
       },
     ]
@@ -243,18 +233,13 @@ const normalize = Effect.fnUntraced(function* (catalog: Record<string, unknown>)
     yield* Effect.logDebug("Skipped models.dev APIs with entrypoints this build doesn't have", {
       entrypoints: [...unknown],
     })
-  const first = snapshots.map((snapshot) => snapshot.first)
-  return {
-    first,
-    recommended: snapshots.some((snapshot) => snapshot.recommended)
-      ? snapshots.map((snapshot) => snapshot.recommended ?? snapshot.first)
-      : first,
-  }
+  return snapshots as readonly Snapshot[]
 })
 
 function providerSnapshot(
   providerID: Provider.ID,
-  provider: typeof SourceProvider.Type,
+  name: string,
+  environment: readonly string[],
   sources: readonly { readonly model: SourceModel; readonly route: Route }[],
 ): Snapshot | undefined {
   // v2 lists APIs per model, so the provider defaults are what most of its models use. A model that
@@ -265,7 +250,7 @@ function providerSnapshot(
   const baseURL = urls.every((url) => url !== undefined) ? mostCommon(urls) : undefined
   const info = {
     id: providerID,
-    name: provider.name,
+    name,
     activation: "auto",
     package: packageName,
     ...(baseURL ? { settings: { baseURL } } : {}),
@@ -290,7 +275,7 @@ function providerSnapshot(
       ),
     ]
   })
-  return { info, models, environment: [...provider.env] }
+  return { info, models, environment }
 }
 
 function entries<A>(record: Record<string, unknown> | undefined, decode: (input: unknown) => Option.Option<A>) {
@@ -299,35 +284,23 @@ function entries<A>(record: Record<string, unknown> | undefined, decode: (input:
   )
 }
 
-function route(providerID: Provider.ID, model: SourceModel, unknown: Set<string>) {
-  // A chat model uses its first loadable API unless the Location opts into its recommended API.
-  // Other types (image, decision…) need a native entrypoint for their type.
+function route(
+  providerID: Provider.ID,
+  model: SourceModel,
+  unknown: Set<string>,
+  recommended = false,
+): Route | undefined {
+  // A chat model uses its first API with a package. Other types (image, decision…) only run through the
+  // opencode entrypoint for their type (`providers/<P>/images`) that this build can load, and are skipped
+  // without one: a chat entrypoint loads a chat model, which can't generate images or decisions.
   const apis = entries(model.api, decodeApi).map(
     ([protocol, entry]) => [protocol, entry, loadable(entry.sdk?.opencodeai, unknown)] as const,
   )
-  const eligible = apis.filter(([, entry, opencodeai]) =>
-    model.type === "chat" ? opencodeai || entry.sdk?.aisdk : opencodeai?.endsWith(`/${model.type}s`),
-  )
-  const first = eligible[0]
-  if (!first) return
-  const selected =
-    model.recommended_api !== first[0] ? eligible.find(([protocol]) => protocol === model.recommended_api) : undefined
-  const route = apiRoute(providerID, model, ...first)
-  if (!route) return
-  return {
-    route,
-    recommended: selected && apiRoute(providerID, model, ...selected),
-  }
-}
-
-function apiRoute(
-  providerID: Provider.ID,
-  model: SourceModel,
-  protocol: string,
-  api: typeof SourceApi.Type,
-  opencodeai: string | undefined,
-): Route | undefined {
-  if (!protocol) return
+  const eligible = ([, entry, opencodeai]: (typeof apis)[number]) =>
+    model.type === "chat" ? opencodeai || entry.sdk?.aisdk : opencodeai?.endsWith(`/${model.type}s`)
+  const [protocol, api, opencodeai] =
+    apis.find((api) => (!recommended || api[0] === model.recommended_api) && eligible(api)) ?? []
+  if (!protocol || !api) return undefined
   const aisdk = api.sdk?.aisdk
   const packageName =
     opencodeai ??
@@ -347,6 +320,7 @@ function apiRoute(
     ...(mediaInput ? { mediaInput } : {}),
   }
   return {
+    protocol,
     package: packageName,
     freeform: api.capabilities?.tools?.freeform?.filter(knownFreeformFormat),
     // An empty base_url is how models.dev says it has no URL for the API.
@@ -541,7 +515,7 @@ function modelInfo(
 export { Event } from "@opencode/schema/models-dev"
 
 export interface Interface {
-  readonly get: (recommended?: boolean) => Effect.Effect<readonly Snapshot[]>
+  readonly get: () => Effect.Effect<readonly Snapshot[]>
   readonly refresh: (force?: boolean) => Effect.Effect<void>
 }
 
@@ -574,11 +548,7 @@ const defaultSource = "https://models.opencode.ai"
 // The experimental v2 API, limited to the model types opencode keeps.
 export const catalogPath = `/experimental/v2.0/api.json?type=${TYPES.join(",")}`
 
-export const decodeSnapshot = (text: string) =>
-  decodeCatalog(text).pipe(
-    Effect.flatMap(normalize),
-    Effect.map((catalog) => catalog.first),
-  )
+export const decodeSnapshot = (text: string) => decodeCatalog(text).pipe(Effect.flatMap(normalize))
 
 // Bundled snapshot of the catalog at `catalogPath`, committed at
 // packages/core/src/models-dev/snapshot.txt and refreshed via
@@ -587,12 +557,11 @@ export const decodeSnapshot = (text: string) =>
 // isolate: the snapshot is a multi-MB module-level constant and one isolate can
 // host many runtimes (Cloudflare colocates Durable Object instances), so
 // per-runtime decoding would multiply the cost.
-let bundledCache: Effect.Success<ReturnType<typeof normalize>> | undefined
+let bundledCache: readonly Snapshot[] | undefined
 const bundledSnapshot = Effect.suspend(() =>
   bundledCache
     ? Effect.succeed(bundledCache)
-    : decodeCatalog(snapshotText).pipe(
-        Effect.flatMap(normalize),
+    : decodeSnapshot(snapshotText).pipe(
         Effect.map((snapshot) => {
           bundledCache = snapshot
           return bundledCache
@@ -725,7 +694,7 @@ export const layer = (options?: Options) =>
         if (cached) return yield* normalize(cached.catalog)
         const bundled = yield* loadSnapshot
         if (bundled) return bundled
-        if (!fetch) return { first: [], recommended: [] }
+        if (!fetch) return []
         const catalog = yield* lock.withPermit(
           Effect.gen(function* () {
             const stored = options?.file ? undefined : yield* loadFromCache()
@@ -738,8 +707,7 @@ export const layer = (options?: Options) =>
 
       const [cachedGet, invalidate] = yield* Effect.cachedInvalidateWithTTL(populate, Duration.infinity)
 
-      const get = (recommended = false) =>
-        cachedGet.pipe(Effect.map((catalog) => (recommended ? catalog.recommended : catalog.first)))
+      const get = (): Effect.Effect<readonly Snapshot[]> => cachedGet
 
       const refresh = Effect.fn("ModelsDev.refresh")(function* (force = false) {
         yield* lock

@@ -38,14 +38,6 @@
             "base_url": "https://api.acme.test/v1beta",
             "sdk": {
               "opencodeai": "@opencode/ai/providers/google/interactions"
-            },
-            "capabilities": {
-              "tools": {
-                "freeform": ["text"]
-              }
-            },
-            "compatibility": {
-              "reasoning_field": "thought"
             }
           }
         }

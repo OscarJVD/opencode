@@ -1,12 +1,21 @@
 import { define } from "@opencode/plugin/effect/plugin"
-import { Config } from "@opencode/schema/config"
+import { Event } from "@opencode/schema/config"
 import { Integration } from "@opencode/schema/integration"
 import { Provider } from "@opencode/schema/provider"
 import { Effect, Stream } from "effect"
 import { Bus } from "../bus.js"
+import { Config } from "../config.js"
+import { Credential } from "../credential.js"
 import { Flag } from "../flag.js"
 import { Model } from "../model.js"
 import { ModelsDev } from "../models-dev.js"
+import { foldSettings } from "./provider/configured.js"
+import {
+  expandVertexCatalog,
+  resolveLocation,
+  resolveProject,
+  vertexCredentialSettings,
+} from "./provider/google-vertex.js"
 
 // These catalog entries require inference profiles on Bedrock Runtime.
 // Opus/Sonnet 4.6 and Opus 5.5 support in-region calls in eu-west-2 and must remain available.
@@ -32,27 +41,41 @@ const BEDROCK_PROFILE_ONLY_IDS = [
   "writer.palmyra-x5-v1:0",
 ]
 
-// The provider editor keeps one shared immutable index per catalog model array.
-const catalogRecommendations = new WeakMap<
-  ReadonlyMap<string, Model.Info>,
-  NonNullable<ModelsDev.Snapshot["withoutRecommendation"]>
->()
-
-export function catalogWithoutRecommendation(models: ReadonlyMap<string, Model.Info>, protocol: string) {
-  const fallback = catalogRecommendations.get(models)?.(protocol)
-  return fallback && filterModels(fallback)
-}
-
 export const ModelsDevPlugin = define({
   id: "opencode.models.dev",
   effect: Effect.fn(function* (ctx) {
     const modelsDev = yield* ModelsDev.Service
     const bus = yield* Bus.Service
     const flags = yield* Flag.Service
-    const get = flags.enabled("recommended_api").pipe(Effect.flatMap((enabled) => modelsDev.get(enabled)))
-    // Filtering and definition indexes are shared across Locations. Only Model materialization
-    // makes mutable copies, after provider configuration and access have been resolved.
-    const loaded = { data: snapshots(yield* get) }
+    const config = yield* Config.Service
+    let vertex:
+      | { source: ModelsDev.Snapshot; location: string; project: string | undefined; data: ModelsDev.Snapshot }
+      | undefined
+    const get = Effect.gen(function* () {
+      const data = (yield* modelsDev.get()).filter(
+        // These deprecated aliases are replaced by the canonical Azure and Google Vertex providers.
+        (provider) => provider.info.id !== "azure-cognitive-services" && provider.info.id !== "google-vertex-anthropic",
+      )
+      const entries = yield* config.entries()
+      if (!flags.resolve(entries).recommended_api.enabled) return data.map(filtered)
+      const source = data.find((provider) => provider.info.id === Provider.ID.googleVertex)
+      const selected = source?.recommend ? yield* vertexCredentialSettings(ctx.integration) : undefined
+      const settings = selected && (foldSettings(entries, Provider.ID.googleVertex, selected) ?? selected)
+      const location = resolveLocation(settings ?? {}) ?? "global"
+      const project = resolveProject(settings ?? {})
+      // Interactions only serves global, us and eu: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/interactions#security-and-compliance
+      const recommended = ["global", "us", "eu"].includes(location) ? source?.recommend?.() : undefined
+      if (recommended && (vertex?.source !== recommended || vertex.location !== location || vertex.project !== project))
+        vertex = { source: recommended, location, project, data: expandVertexCatalog(recommended, project, location) }
+      return data.map((provider) =>
+        filtered(
+          provider.info.id === Provider.ID.googleVertex
+            ? ((recommended && vertex?.data) ?? provider)
+            : (provider.recommend?.() ?? provider),
+        ),
+      )
+    })
+    const loaded = { data: yield* get }
     yield* ctx.integration.transform((integrations) => {
       for (const provider of loaded.data) {
         if (provider.environment.length === 0) continue
@@ -78,45 +101,30 @@ export const ModelsDevPlugin = define({
           info: { ...provider.info, integrationID: Integration.ID.make(provider.info.id) },
           models: provider.models,
         })
-        const record = providers.get(provider.info.id)
-        if (record && provider.withoutRecommendation)
-          catalogRecommendations.set(record.models, provider.withoutRecommendation)
       }
     })
-    const apply = (data: readonly ModelsDev.Snapshot[]) => {
-      const latest = snapshots(data)
-      if (latest === loaded.data) return Effect.void
-      loaded.data = latest
+    const apply = (data: ModelsDev.Snapshot[]) => {
+      if (data.length === loaded.data.length && data.every((provider, index) => provider === loaded.data[index]))
+        return Effect.void
+      loaded.data = data
       return ctx.integration.reload().pipe(Effect.andThen(ctx.provider.reload()))
     }
-    yield* bus.subscribe([ModelsDev.Event.Refreshed, Config.Event.Updated]).pipe(
-      Stream.runForEach(() => get.pipe(Effect.flatMap(apply))),
-      Effect.forkScoped({ startImmediately: true }),
-    )
+    yield* bus
+      .subscribe([ModelsDev.Event.Refreshed, Event.Updated, Credential.Event.Updated, Credential.Event.Switched])
+      .pipe(
+        Stream.runForEach(() => get.pipe(Effect.flatMap(apply))),
+        Effect.forkScoped({ startImmediately: true }),
+      )
     // A refresh that landed between the initial read and the subscription above published
-    // Refreshed to nobody here. On a cold cache that read served the bundled snapshot, so
-    // re-read now instead of waiting for the next TTL refresh.
+    // Refreshed to nobody here. Re-read now instead of waiting for the next TTL refresh.
     yield* get.pipe(Effect.flatMap(apply))
   }),
 })
 
-const prepared = new WeakMap<readonly ModelsDev.Snapshot[], readonly ModelsDev.Snapshot[]>()
+const filteredProviders = new WeakMap<ModelsDev.Snapshot, ModelsDev.Snapshot>()
 
-function snapshots(data: readonly ModelsDev.Snapshot[]) {
-  const cached = prepared.get(data)
-  if (cached) return cached
-  const result = data
-    .filter(
-      // These deprecated aliases are replaced by the canonical Azure and Google Vertex providers.
-      (provider) => provider.info.id !== "azure-cognitive-services" && provider.info.id !== "google-vertex-anthropic",
-    )
-    .map(filterModels)
-  prepared.set(data, result)
-  return result
-}
-
-function filterModels(provider: ModelsDev.Snapshot): ModelsDev.Snapshot {
-  const cached = filtered.get(provider)
+function filtered(provider: ModelsDev.Snapshot): ModelsDev.Snapshot {
+  const cached = filteredProviders.get(provider)
   if (cached) return cached
   const result = {
     ...provider,
@@ -130,8 +138,6 @@ function filterModels(provider: ModelsDev.Snapshot): ModelsDev.Snapshot {
         ),
     ),
   }
-  filtered.set(provider, result)
+  filteredProviders.set(provider, result)
   return result
 }
-
-const filtered = new WeakMap<ModelsDev.Snapshot, ModelsDev.Snapshot>()
