@@ -4,6 +4,13 @@ type Content = SessionMessageAssistant["content"][number]
 
 const changes = new WeakMap<SessionMessageAssistantTool, SessionMessageAssistantTool | undefined>()
 
+const added = new WeakSet<{ type: string }>()
+
+/** Whether a part is the files call added after a script, which is not a call of its own in summaries. */
+export function isScriptFiles(content: { type: string }) {
+  return added.has(content)
+}
+
 /**
  * The files a finished Code Mode script changed, as a `patch` call of their own right after it. The timeline places
  * and opens it by the Edits setting, like a direct patch. A script moved to the background has none.
@@ -27,6 +34,8 @@ export function scriptFileChanges(content: Content) {
 
   changes.set(content, change)
 
+  if (change) added.add(change)
+
   return change
 }
 
@@ -37,4 +46,9 @@ export function withScriptFileChanges(content: readonly Content[]) {
 
     return change ? [item, change] : [item]
   })
+}
+
+/** The calls a group's "Used N …" summary counts: tools and shells, without the files added after a script. */
+export function summaryCalls<T extends { type: string }>(parts: readonly T[]) {
+  return parts.filter((part) => (part.type === "tool" || part.type === "shell") && !isScriptFiles(part))
 }

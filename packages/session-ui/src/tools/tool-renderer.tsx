@@ -46,6 +46,7 @@ import { IconButton } from "@opencode/ui/icon-button"
 import { TextShimmer } from "@opencode/ui/text-shimmer"
 import { AnimatedNumber } from "@opencode/ui/animated-number"
 import { changedFileDiff, patchFileGroups } from "../components/apply-patch-file"
+import { summaryCalls } from "../message/script-files"
 import { animate } from "@kitlangton/solid-motion"
 import { SessionProgressIndicatorV2 } from "../v2/components/session-progress-indicator-v2"
 import type {
@@ -445,7 +446,7 @@ export function CurrentContextToolGroup(props: {
   const names = createMemo(() =>
     i18n.list([
       ...new Set(
-        props.parts.flatMap((part) => {
+        summaryCalls(props.parts).flatMap((part) => {
           if (part.type !== "tool" && part.type !== "shell") return []
 
           return [part.type === "tool" ? toolTitle(part, i18n) : i18n.t("ui.tool.shell")]
@@ -504,7 +505,7 @@ export function CurrentContextToolGroup(props: {
     }
 
     const title = names() || i18n.plural("ui.messagePart.context.thought", thoughts)
-    const count = props.parts.filter((part) => part.type === "tool" || part.type === "shell").length || thoughts
+    const count = summaryCalls(props.parts).length || thoughts
     const text = i18n.plural("ui.messagePart.tools.used", count, { tools: title })
     const index = text.indexOf(title)
     const before = text.slice(0, index).trim()
