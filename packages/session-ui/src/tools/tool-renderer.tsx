@@ -1949,6 +1949,9 @@ ToolRegistry.register({
     const calls = createMemo(() => executeToolCalls(props.metadata))
     const subtitle = createMemo(() => executeToolSubtitle(calls()))
     const code = createMemo(() => (toolInput(props.input).code ?? "").trimEnd())
+    // The files the script changed, one merged diff each. Past the size cap a file has counts but no patch.
+    const changed = createMemo(() => executeFiles(props.metadata.files))
+    const Patch = ToolRegistry.render("patch")
 
     // A runtime failure shows its output on the failing row; a successful script shows its result below the calls.
     const error = createMemo(() => {
@@ -1981,51 +1984,84 @@ ToolRegistry.register({
       ))
 
     return (
-      <BasicTool
-        {...props}
-        icon="terminal"
-        rail={false}
-        hasContent={calls().length > 0 || !!error() || !!output()}
-        compact
-        allowOpenWhilePending
-        trigger={(open) => (
-          <div data-slot="basic-tool-tool-info-structured">
-            <div data-slot="basic-tool-tool-info-main">
-              <span data-slot="basic-tool-tool-title">
-                <TextShimmer text={i18n.t("ui.tool.execute")} active={pending()} />
-              </span>
-              <Show when={!open() && subtitle()}>
-                {(text) => <ShellSubmessage text={text()} animate={sawPending} />}
-              </Show>
+      <>
+        <BasicTool
+          {...props}
+          icon="terminal"
+          rail={false}
+          hasContent={calls().length > 0 || !!error() || !!output()}
+          compact
+          allowOpenWhilePending
+          trigger={(open) => (
+            <div data-slot="basic-tool-tool-info-structured">
+              <div data-slot="basic-tool-tool-info-main">
+                <span data-slot="basic-tool-tool-title">
+                  <TextShimmer text={i18n.t("ui.tool.execute")} active={pending()} />
+                </span>
+                <Show when={!open() && subtitle()}>
+                  {(text) => <ShellSubmessage text={text()} animate={sawPending} />}
+                </Show>
+              </div>
             </div>
+          )}
+          action={
+            viewable() ? (
+              <Tooltip value={i18n.t("ui.tool.execute.viewCode")} placement="top">
+                <IconButton
+                  icon={<Icon name="code" />}
+                  size="normal"
+                  variant="ghost"
+                  aria-label={i18n.t("ui.tool.execute.viewCode")}
+                  aria-haspopup="dialog"
+                  onClick={openDetails}
+                />
+              </Tooltip>
+            ) : undefined
+          }
+        >
+          <div data-component="execute-tool-calls">
+            <Index each={calls()}>
+              {(call, index) => <ExecuteCallRow call={call()} error={index === owner() ? error() : undefined} />}
+            </Index>
+            <Show when={owner() === -1 && error()}>{(text) => <ExecuteCallRow error={text()} />}</Show>
+            <Show when={output()}>{(value) => <ExecuteOutputRow output={value()} />}</Show>
           </div>
-        )}
-        action={
-          viewable() ? (
-            <Tooltip value={i18n.t("ui.tool.execute.viewCode")} placement="top">
-              <IconButton
-                icon={<Icon name="code" />}
-                size="normal"
-                variant="ghost"
-                aria-label={i18n.t("ui.tool.execute.viewCode")}
-                aria-haspopup="dialog"
-                onClick={openDetails}
-              />
-            </Tooltip>
-          ) : undefined
-        }
-      >
-        <div data-component="execute-tool-calls">
-          <Index each={calls()}>
-            {(call, index) => <ExecuteCallRow call={call()} error={index === owner() ? error() : undefined} />}
-          </Index>
-          <Show when={owner() === -1 && error()}>{(text) => <ExecuteCallRow error={text()} />}</Show>
-          <Show when={output()}>{(value) => <ExecuteOutputRow output={value()} />}</Show>
-        </div>
-      </BasicTool>
+        </BasicTool>
+        <Show when={Patch && changed().diffs.length > 0}>
+          {Patch?.({ ...props, tool: "patch", pendingFiles: undefined, metadata: { files: changed().diffs } })}
+        </Show>
+        <Index each={changed().counts}>
+          {(file) => (
+            <div data-component="execute-tool-file" data-type={file().status}>
+              <FileIcon node={{ path: file().file, type: "file" }} />
+              <span data-slot="execute-tool-file-name">{file().file}</span>
+              <DiffChanges appearance="standard" changes={file()} />
+            </div>
+          )}
+        </Index>
+      </>
     )
   },
 })
+
+const CountedFile = Schema.Struct({
+  file: Schema.String,
+  status: Schema.String,
+  additions: Schema.Number,
+  deletions: Schema.Number,
+})
+
+const isCountedFile = Schema.is(CountedFile)
+
+// A script's changed files: those with a patch show as diffs, the rest (past the size cap, or binary) as counts.
+function executeFiles(files: ToolProps["metadata"][string]) {
+  const list = Array.isArray(files) ? files : []
+
+  return {
+    diffs: list.filter((file) => changedFileDiff(file)),
+    counts: list.filter((file) => !changedFileDiff(file) && isCountedFile(file)).filter(isCountedFile),
+  }
+}
 
 function ExecuteDetails(props: { code: string; output: string; error?: string; calls: number; status?: string }) {
   const i18n = useI18n()
