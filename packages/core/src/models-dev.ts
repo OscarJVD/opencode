@@ -152,6 +152,7 @@ export type Snapshot = {
   readonly info: Provider.Info
   readonly models: readonly Model.Info[]
   readonly environment: readonly string[]
+  readonly withoutRecommendation?: (protocol: string) => Snapshot | undefined
 }
 
 type Route = {
@@ -199,14 +200,38 @@ const normalize = Effect.fnUntraced(function* (catalog: Record<string, unknown>)
     const first = providerSnapshot(providerID, item, routes)
     if (!first) return []
     // Recompute provider defaults only for providers with a different route.
-    const recommended = routes.some((source) => source.recommended)
-      ? providerSnapshot(
-          providerID,
-          item,
-          routes.map((source) => ({ model: source.model, route: source.recommended ?? source.route })),
-        )
-      : undefined
-    return [{ first, recommended }]
+    if (!routes.some((source) => source.recommended)) return [{ first, recommended: undefined }]
+    const recommended = providerSnapshot(
+      providerID,
+      item,
+      routes.map((source) => ({ model: source.model, route: source.recommended ?? source.route })),
+    )
+    const fallbacks = new Map<string, Snapshot | undefined>()
+    return [
+      {
+        first,
+        recommended: recommended && {
+          ...recommended,
+          withoutRecommendation: (protocol: string) => {
+            if (fallbacks.has(protocol)) return fallbacks.get(protocol)
+            const remaining = routes.map((source) =>
+              source.model.recommended_api === protocol ? undefined : source.recommended,
+            )
+            const fallback = !routes.some((source, index) => source.recommended !== remaining[index])
+              ? undefined
+              : remaining.some(Boolean)
+                ? providerSnapshot(
+                    providerID,
+                    item,
+                    routes.map((source, index) => ({ model: source.model, route: remaining[index] ?? source.route })),
+                  )
+                : first
+            fallbacks.set(protocol, fallback)
+            return fallback
+          },
+        },
+      },
+    ]
   })
   if (failed.length > 0)
     yield* Effect.logWarning("Skipped models.dev models that failed to parse", {

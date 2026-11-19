@@ -4,9 +4,12 @@ import { define } from "@opencode/plugin/effect/plugin"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { Bus } from "../../bus.js"
+import { Config } from "../../config.js"
+import { ConfigEntryObserver } from "../../config/plugin/entry-observer.js"
 import { Credential } from "../../credential.js"
 import { Provider } from "../../provider.js"
-import { configuredSettings } from "./configured.js"
+import { catalogWithoutRecommendation } from "../models-dev.js"
+import { configuredSettings, foldSettings } from "./configured.js"
 
 const ADC_METHOD = "google-adc"
 
@@ -162,6 +165,8 @@ export const GoogleVertexPlugin = define({
         },
       })
     })
+    const config = yield* Config.Service
+    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, ctx.provider.reload())
     yield* ctx.provider.transform((evt) => {
       for (const item of evt.list()) {
         if (
@@ -173,20 +178,31 @@ export const GoogleVertexPlugin = define({
         )
           continue
         const settings = settingsFor(item.provider)
-        const project = resolveProject(settings)
-        const location = resolveLocation(settings) ?? "global"
+        const withoutInteractions =
+          item.provider.id === Provider.ID.googleVertex
+            ? catalogWithoutRecommendation(item.models, "interactions")
+            : undefined
+        const configured = withoutInteractions
+          ? (foldSettings(loaded.entries, item.provider.id, settings) ?? settings)
+          : settings
+        const project = resolveProject(configured)
+        const location = resolveLocation(configured) ?? "global"
+        // Interactions only serves global, us and eu: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/interactions#security-and-compliance
+        const fallback = ["global", "us", "eu"].includes(location) ? undefined : withoutInteractions
+        if (fallback) evt.models.set(item.provider.id, fallback.models)
         evt.update(item.provider.id, (provider) => {
           // Vertex authenticates through ADC rather than a key credential, so a
           // resolvable project is what makes the provider usable.
           if (project && provider.activation === "auto") provider.activation = "enabled"
+          if (fallback) provider.package = fallback.info.package
+          const baseURL = (fallback ? fallback.info : provider).settings?.baseURL
           provider.settings = {
-            ...settingsFor(provider),
+            ...settings,
             ...(project ? { project } : {}),
             location,
-            ...(typeof provider.settings?.baseURL === "string"
-              ? { baseURL: replaceVertexVars(provider.settings.baseURL, project, location) }
-              : {}),
+            ...(typeof baseURL === "string" ? { baseURL: replaceVertexVars(baseURL, project, location) } : {}),
           }
+          if (fallback && baseURL === undefined) delete provider.settings.baseURL
         })
       }
     })
@@ -200,12 +216,17 @@ export const GoogleVertexPlugin = define({
           )
         )
           continue
-        const settings = settingsFor(item.provider)
-        const project = resolveProject(settings)
-        const location = resolveLocation(settings) ?? "global"
         for (const model of models.list(item.provider.id)) {
           if (typeof model.settings?.baseURL !== "string") continue
-          const baseURL = replaceVertexVars(model.settings.baseURL, project, location)
+          const settings =
+            (model.package ?? item.provider.package) === "@opencode/ai/providers/google-vertex/interactions"
+              ? (item.provider.settings ?? {})
+              : settingsFor(item.provider)
+          const baseURL = replaceVertexVars(
+            model.settings.baseURL,
+            resolveProject(settings),
+            resolveLocation(settings) ?? "global",
+          )
           models.update(item.provider.id, model.id, (draft) => {
             draft.settings = {
               ...draft.settings,

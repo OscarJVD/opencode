@@ -1,0 +1,70 @@
+{
+  "google-vertex": {
+    "id": "google-vertex",
+    "name": "Google Vertex AI",
+    "env": ["GOOGLE_VERTEX_PROJECT", "GOOGLE_VERTEX_LOCATION"],
+    "models": {
+      "gemini-3.1-pro-preview": {
+        "id": "gemini-3.1-pro-preview",
+        "type": "chat",
+        "name": "Gemini 3.1 Pro Preview",
+        "release_date": "2026-02-19",
+        "modalities": {
+          "input": ["text"],
+          "output": ["text"]
+        },
+        "capabilities": {
+          "tools": {
+            "supported": true
+          },
+          "reasoning": {
+            "supported": true,
+            "effort": ["low", "high"]
+          }
+        },
+        "recommended_api": "interactions",
+        "api": {
+          "generate-content": {
+            "base_url": "https://${GOOGLE_VERTEX_ENDPOINT}/v1beta1/projects/${GOOGLE_VERTEX_PROJECT}/locations/${GOOGLE_VERTEX_LOCATION}/publishers/google",
+            "sdk": {
+              "opencodeai": "@opencode/ai/providers/google-vertex/gemini"
+            }
+          },
+          "interactions": {
+            "base_url": "https://${GOOGLE_VERTEX_ENDPOINT}/v1beta1/projects/${GOOGLE_VERTEX_PROJECT}/locations/${GOOGLE_VERTEX_LOCATION}",
+            "sdk": {
+              "opencodeai": "@opencode/ai/providers/google-vertex/interactions"
+            }
+          }
+        }
+      },
+      "gemini-2.5-flash": {
+        "id": "gemini-2.5-flash",
+        "type": "chat",
+        "name": "Gemini 2.5 Flash",
+        "release_date": "2026-02-19",
+        "modalities": {
+          "input": ["text"],
+          "output": ["text"]
+        },
+        "capabilities": {
+          "tools": {
+            "supported": true
+          },
+          "reasoning": {
+            "supported": true,
+            "effort": ["low", "high"]
+          }
+        },
+        "api": {
+          "generate-content": {
+            "base_url": "https://${GOOGLE_VERTEX_ENDPOINT}/v1beta1/projects/${GOOGLE_VERTEX_PROJECT}/locations/${GOOGLE_VERTEX_LOCATION}/publishers/google",
+            "sdk": {
+              "opencodeai": "@opencode/ai/providers/google-vertex/gemini"
+            }
+          }
+        }
+      }
+    }
+  }
+}

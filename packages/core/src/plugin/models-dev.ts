@@ -32,6 +32,17 @@ const BEDROCK_PROFILE_ONLY_IDS = [
   "writer.palmyra-x5-v1:0",
 ]
 
+// The provider editor keeps one shared immutable index per catalog model array.
+const catalogRecommendations = new WeakMap<
+  ReadonlyMap<string, Model.Info>,
+  NonNullable<ModelsDev.Snapshot["withoutRecommendation"]>
+>()
+
+export function catalogWithoutRecommendation(models: ReadonlyMap<string, Model.Info>, protocol: string) {
+  const fallback = catalogRecommendations.get(models)?.(protocol)
+  return fallback && filterModels(fallback)
+}
+
 export const ModelsDevPlugin = define({
   id: "opencode.models.dev",
   effect: Effect.fn(function* (ctx) {
@@ -67,6 +78,9 @@ export const ModelsDevPlugin = define({
           info: { ...provider.info, integrationID: Integration.ID.make(provider.info.id) },
           models: provider.models,
         })
+        const record = providers.get(provider.info.id)
+        if (record && provider.withoutRecommendation)
+          catalogRecommendations.set(record.models, provider.withoutRecommendation)
       }
     })
     const apply = (data: readonly ModelsDev.Snapshot[]) => {
@@ -96,19 +110,28 @@ function snapshots(data: readonly ModelsDev.Snapshot[]) {
       // These deprecated aliases are replaced by the canonical Azure and Google Vertex providers.
       (provider) => provider.info.id !== "azure-cognitive-services" && provider.info.id !== "google-vertex-anthropic",
     )
-    .map((provider) => ({
-      ...provider,
-      models: provider.models.filter(
-        (model) =>
-          model.status !== "deprecated" &&
-          // Non-chat models are kept for lookups; the Model service never offers them for sessions.
-          ((model.type ?? "chat") !== "chat" || Model.supportsText(model)) &&
-          !(
-            provider.info.id === Provider.ID.amazonBedrock &&
-            BEDROCK_PROFILE_ONLY_IDS.includes(model.modelID ?? model.id)
-          ),
-      ),
-    }))
+    .map(filterModels)
   prepared.set(data, result)
   return result
 }
+
+function filterModels(provider: ModelsDev.Snapshot): ModelsDev.Snapshot {
+  const cached = filtered.get(provider)
+  if (cached) return cached
+  const result = {
+    ...provider,
+    models: provider.models.filter(
+      (model) =>
+        model.status !== "deprecated" &&
+        // Non-chat models are kept for lookups; the Model service never offers them for sessions.
+        ((model.type ?? "chat") !== "chat" || Model.supportsText(model)) &&
+        !(
+          provider.info.id === Provider.ID.amazonBedrock && BEDROCK_PROFILE_ONLY_IDS.includes(model.modelID ?? model.id)
+        ),
+    ),
+  }
+  filtered.set(provider, result)
+  return result
+}
+
+const filtered = new WeakMap<ModelsDev.Snapshot, ModelsDev.Snapshot>()
