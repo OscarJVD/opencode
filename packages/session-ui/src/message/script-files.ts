@@ -48,7 +48,13 @@ export function withScriptFileChanges(content: readonly Content[]) {
   })
 }
 
-/** The calls a group's "Used N …" summary counts: tools and shells, without the files added after a script. */
+/**
+ * The calls a group's "Used N …" summary counts: tools and shells, without the files added after a script. A group
+ * holding only those files, because scripts are hidden (Quiet), counts them as the patch they show as.
+ */
 export function summaryCalls<T extends { type: string }>(parts: readonly T[]) {
-  return parts.filter((part) => (part.type === "tool" || part.type === "shell") && !isScriptFiles(part))
+  const calls = parts.filter((part) => part.type === "tool" || part.type === "shell")
+  const own = calls.filter((part) => !isScriptFiles(part))
+
+  return own.length > 0 ? own : calls
 }

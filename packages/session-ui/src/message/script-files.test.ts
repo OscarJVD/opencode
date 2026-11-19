@@ -56,4 +56,10 @@ describe("withScriptFileChanges", () => {
 
     expect(label).toBe("Used 1 Execute")
   })
+
+  test("a group with only a script's files, its script hidden, counts them as one patch", () => {
+    const change = withScriptFileChanges([script("completed", { files })])[1]!
+
+    expect(summaryCalls([change])).toEqual([change])
+  })
 })
