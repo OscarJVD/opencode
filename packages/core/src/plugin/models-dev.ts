@@ -9,13 +9,7 @@ import { Credential } from "../credential.js"
 import { Flag } from "../flag.js"
 import { Model } from "../model.js"
 import { ModelsDev } from "../models-dev.js"
-import { foldSettings } from "./provider/configured.js"
-import {
-  expandVertexCatalog,
-  resolveLocation,
-  resolveProject,
-  vertexCredentialSettings,
-} from "./provider/google-vertex.js"
+import { vertexCatalog } from "./provider/google-vertex.js"
 
 // These catalog entries require inference profiles on Bedrock Runtime.
 // Opus/Sonnet 4.6 and Opus 5.5 support in-region calls in eu-west-2 and must remain available.
@@ -48,9 +42,7 @@ export const ModelsDevPlugin = define({
     const bus = yield* Bus.Service
     const flags = yield* Flag.Service
     const config = yield* Config.Service
-    let vertex:
-      | { source: ModelsDev.Snapshot; location: string; project: string | undefined; data: ModelsDev.Snapshot }
-      | undefined
+    const recommendedVertex = vertexCatalog(ctx.integration)
     const get = Effect.gen(function* () {
       const data = (yield* modelsDev.get()).filter(
         // These deprecated aliases are replaced by the canonical Azure and Google Vertex providers.
@@ -58,21 +50,12 @@ export const ModelsDevPlugin = define({
       )
       const entries = yield* config.entries()
       if (!flags.resolve(entries).recommended_api.enabled) return data.map(filtered)
-      const source = data.find((provider) => provider.info.id === Provider.ID.googleVertex)
-      const selected = source?.recommend ? yield* vertexCredentialSettings(ctx.integration) : undefined
-      const settings = selected && (foldSettings(entries, Provider.ID.googleVertex, selected) ?? selected)
-      const location = resolveLocation(settings ?? {}) ?? "global"
-      const project = resolveProject(settings ?? {})
-      // Interactions only serves global, us and eu: https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/interactions#security-and-compliance
-      const recommended = ["global", "us", "eu"].includes(location) ? source?.recommend?.() : undefined
-      if (recommended && (vertex?.source !== recommended || vertex.location !== location || vertex.project !== project))
-        vertex = { source: recommended, location, project, data: expandVertexCatalog(recommended, project, location) }
+      const vertex = yield* recommendedVertex(
+        data.find((provider) => provider.info.id === Provider.ID.googleVertex),
+        entries,
+      )
       return data.map((provider) =>
-        filtered(
-          provider.info.id === Provider.ID.googleVertex
-            ? ((recommended && vertex?.data) ?? provider)
-            : (provider.recommend?.() ?? provider),
-        ),
+        filtered((provider.info.id === Provider.ID.googleVertex ? vertex : provider.recommend?.()) ?? provider),
       )
     })
     const loaded = { data: yield* get }

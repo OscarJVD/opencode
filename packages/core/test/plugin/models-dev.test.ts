@@ -157,34 +157,50 @@ describe("ModelsDevPlugin", () => {
     )
   }
 
-  isolated.live("keeps Vertex on its first API when config selects a single region", () =>
-    withEnv({ GOOGLE_VERTEX_PROJECT: "test-project", GOOGLE_VERTEX_LOCATION: "us" }, () =>
-      Effect.gen(function* () {
-        const source = yield* ModelsDev.Service
-        const location = yield* owner
-        yield* Context.get(location.context, Config.Test).setEntries([
-          new Document({
-            type: "document",
-            info: Schema.decodeUnknownSync(Info)({
-              experimental: { recommended_api: true },
-              providers: { "google-vertex": { settings: { location: "us-central1" } } },
+  for (const entry of [
+    { source: "config", config: "us-central1" },
+    { source: "the stored credential over config", config: "global", credential: "us-central1" },
+  ]) {
+    isolated.live(`keeps Vertex on its first API when ${entry.source} selects a single region`, () =>
+      withEnv({ GOOGLE_VERTEX_PROJECT: "test-project", GOOGLE_VERTEX_LOCATION: "us" }, () =>
+        Effect.gen(function* () {
+          const source = yield* ModelsDev.Service
+          const location = yield* owner
+          if (entry.credential) {
+            const credentials = Context.get(location.context, Credential.Service)
+            yield* credentials.create({
+              integrationID: Integration.ID.make(Provider.ID.googleVertex),
+              value: Credential.External.make({
+                type: "external",
+                methodID: Integration.MethodID.make("google-adc"),
+                metadata: { project: "test-project", location: entry.credential },
+              }),
+            })
+          }
+          yield* Context.get(location.context, Config.Test).setEntries([
+            new Document({
+              type: "document",
+              info: Schema.decodeUnknownSync(Info)({
+                experimental: { recommended_api: true },
+                providers: { "google-vertex": { settings: { location: entry.config } } },
+              }),
             }),
-          }),
-        ])
-        yield* ModelsDevPlugin.effect(location.host).pipe(
-          Effect.provideService(ModelsDev.Service, source),
-          Effect.provideContext(location.context),
-        )
-        yield* GoogleVertexPlugin.effect(location.host).pipe(Effect.provideContext(location.context))
+          ])
+          yield* ModelsDevPlugin.effect(location.host).pipe(
+            Effect.provideService(ModelsDev.Service, source),
+            Effect.provideContext(location.context),
+          )
+          yield* GoogleVertexPlugin.effect(location.host).pipe(Effect.provideContext(location.context))
 
-        const model = required(
-          yield* location.models.get(Provider.ID.googleVertex, Model.ID.make("gemini-3.1-pro-preview")),
-        )
-        expect(model.package).toBe("@opencode/ai/providers/google-vertex/gemini")
-        expect(model.settings?.baseURL).toBeUndefined()
-      }).pipe(Effect.provide(models(path.join(import.meta.dir, "fixtures", "models-dev-google-vertex.json")))),
-    ),
-  )
+          const model = required(
+            yield* location.models.get(Provider.ID.googleVertex, Model.ID.make("gemini-3.1-pro-preview")),
+          )
+          expect(model.package).toBe("@opencode/ai/providers/google-vertex/gemini")
+          expect(model.settings?.baseURL).toBeUndefined()
+        }).pipe(Effect.provide(models(path.join(import.meta.dir, "fixtures", "models-dev-google-vertex.json")))),
+      ),
+    )
+  }
 
   isolated.effect("shares definitions between Locations while provider and model edits own their copies", () =>
     Effect.gen(function* () {
