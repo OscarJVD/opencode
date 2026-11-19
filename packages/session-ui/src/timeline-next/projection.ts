@@ -1,3 +1,4 @@
+import { withScriptFileChanges } from "../message/script-files"
 import type {
   ModelRef,
   SessionMessageAssistant,
@@ -246,7 +247,7 @@ export function resolveContent(message: SessionMessageInfo | undefined, partID: 
 export function contentEntries(message: SessionMessageAssistant) {
   const ordinals = { text: 0, reasoning: 0 }
 
-  return message.content.map((content) => ({
+  return withScriptFileChanges(message.content).map((content) => ({
     id: content.type === "tool" ? content.id : `${message.id}:${content.type}:${ordinals[content.type]++}`,
     content,
   }))

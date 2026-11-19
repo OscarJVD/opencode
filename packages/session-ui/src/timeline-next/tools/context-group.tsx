@@ -19,8 +19,6 @@ import {
   CurrentReadToolGroup,
   currentSkillName,
   displayDirectory,
-  ExecuteFileChanges,
-  ExecuteFilesShownByGroup,
   scrollParent,
   toolInput,
   toolMetadata,
@@ -187,135 +185,132 @@ export function ContextGroup(props: {
           data-component="collapsed-tool-group"
           data-timeline-part-ids={props.parts.map((part) => part.id).join(",")}
         >
-          <ExecuteFilesShownByGroup.Provider value={true}>
-            <BasicTool
-              icon="glasses"
-              status="completed"
-              compact
-              hasContent
-              allowOpenWhilePending
-              open={props.open}
-              onOpenChange={change}
-              trigger={
-                <div data-component="context-tool-group-trigger" aria-label={label().text}>
-                  <Show when={activity()} fallback={<UsedTitle label={usedLabel(props.parts, i18n)} />}>
-                    {(value) => (
-                      <span data-slot="context-tool-group-title" data-activity="">
-                        <span data-slot="context-tool-group-verb">{value().verb}</span>
-                        <Show when={value().main}>
-                          <span data-slot="context-tool-group-detail">{value().main}</span>
-                        </Show>
-                        <Show when={value().others.length > 0}>
-                          <span data-slot="context-tool-group-separator" aria-hidden="true">
-                            ·
-                          </span>
-                          <span data-slot="context-tool-group-detail">{value().others.join(", ")}</span>
-                        </Show>
-                      </span>
-                    )}
-                  </Show>
-                </div>
-              }
-            >
-              <div data-component="context-tool-group-list">
-                <Index each={items()}>
-                  {(item) => {
-                    const group = createMemo(() => {
-                      const value = item()
-
-                      return Array.isArray(value) ? value : undefined
-                    })
-
-                    const reasoning = createMemo(() => {
-                      const value = item()
-
-                      return !Array.isArray(value) && value.type === "reasoning" ? value : undefined
-                    })
-
-                    const callback = createMemo(() => {
-                      const value = item()
-
-                      return !Array.isArray(value) &&
-                        (value.type === "notice" || value.type === "shell" || value.type === "text")
-                        ? value
-                        : undefined
-                    })
-
-                    const work = createMemo(() => {
-                      const value = item()
-
-                      return !Array.isArray(value) && value.type === "work" ? value : undefined
-                    })
-
-                    return (
-                      <Show
-                        when={group()}
-                        fallback={
-                          <Show
-                            when={reasoning()}
-                            fallback={
-                              <Show
-                                when={work()}
-                                fallback={
-                                  <Show when={callback()}>
-                                    {(part) => <div data-slot="context-tool-group-item">{part().render()}</div>}
-                                  </Show>
-                                }
-                              >
-                                {(work) => (
-                                  <div data-slot="context-tool-group-item">
-                                    <TimelineEventRow
-                                      events={work().events}
-                                      open={props.toolOpen?.(`events:${work().id}`) === true}
-                                      onOpenChange={(open) => {
-                                        props.onToolOpenChange?.(`events:${work().id}`, open)
-                                        props.onSizeChange?.()
-                                      }}
-                                      onRevealShell={props.onRevealShell}
-                                    />
-                                  </div>
-                                )}
-                              </Show>
-                            }
-                          >
-                            {(part) => (
-                              <div data-slot="context-tool-group-item">
-                                <AssistantReasoningContent
-                                  id={part().id}
-                                  content={part()}
-                                  streaming={part().streaming ?? false}
-                                  defaultOpen={props.reasoningDefaultOpen}
-                                  open={props.reasoningOpen?.(part().id)}
-                                  onOpenChange={(open) => props.onReasoningOpenChange?.(part().id, open)}
-                                  onContentRendered={props.onSizeChange}
-                                />
-                              </div>
-                            )}
-                          </Show>
-                        }
-                      >
-                        {(group) => (
-                          <div data-slot="context-tool-group-item">
-                            <GroupItem
-                              tools={group()}
-                              patchKey={patchKeys().get(group()[0]!)}
-                              onSizeChange={props.onSizeChange}
-                              toolDefaultOpen={props.toolDefaultOpen}
-                              toolOpen={props.toolOpen}
-                              onToolOpenChange={props.onToolOpenChange}
-                              fileOpen={props.fileOpen}
-                              onFileOpenChange={props.onFileOpenChange}
-                            />
-                          </div>
-                        )}
+          <BasicTool
+            icon="glasses"
+            status="completed"
+            compact
+            hasContent
+            allowOpenWhilePending
+            open={props.open}
+            onOpenChange={change}
+            trigger={
+              <div data-component="context-tool-group-trigger" aria-label={label().text}>
+                <Show when={activity()} fallback={<UsedTitle label={usedLabel(props.parts, i18n)} />}>
+                  {(value) => (
+                    <span data-slot="context-tool-group-title" data-activity="">
+                      <span data-slot="context-tool-group-verb">{value().verb}</span>
+                      <Show when={value().main}>
+                        <span data-slot="context-tool-group-detail">{value().main}</span>
                       </Show>
-                    )
-                  }}
-                </Index>
+                      <Show when={value().others.length > 0}>
+                        <span data-slot="context-tool-group-separator" aria-hidden="true">
+                          ·
+                        </span>
+                        <span data-slot="context-tool-group-detail">{value().others.join(", ")}</span>
+                      </Show>
+                    </span>
+                  )}
+                </Show>
               </div>
-            </BasicTool>
-          </ExecuteFilesShownByGroup.Provider>
-          <ExecuteFileChanges tools={tools()} onSizeChange={props.onSizeChange} />
+            }
+          >
+            <div data-component="context-tool-group-list">
+              <Index each={items()}>
+                {(item) => {
+                  const group = createMemo(() => {
+                    const value = item()
+
+                    return Array.isArray(value) ? value : undefined
+                  })
+
+                  const reasoning = createMemo(() => {
+                    const value = item()
+
+                    return !Array.isArray(value) && value.type === "reasoning" ? value : undefined
+                  })
+
+                  const callback = createMemo(() => {
+                    const value = item()
+
+                    return !Array.isArray(value) &&
+                      (value.type === "notice" || value.type === "shell" || value.type === "text")
+                      ? value
+                      : undefined
+                  })
+
+                  const work = createMemo(() => {
+                    const value = item()
+
+                    return !Array.isArray(value) && value.type === "work" ? value : undefined
+                  })
+
+                  return (
+                    <Show
+                      when={group()}
+                      fallback={
+                        <Show
+                          when={reasoning()}
+                          fallback={
+                            <Show
+                              when={work()}
+                              fallback={
+                                <Show when={callback()}>
+                                  {(part) => <div data-slot="context-tool-group-item">{part().render()}</div>}
+                                </Show>
+                              }
+                            >
+                              {(work) => (
+                                <div data-slot="context-tool-group-item">
+                                  <TimelineEventRow
+                                    events={work().events}
+                                    open={props.toolOpen?.(`events:${work().id}`) === true}
+                                    onOpenChange={(open) => {
+                                      props.onToolOpenChange?.(`events:${work().id}`, open)
+                                      props.onSizeChange?.()
+                                    }}
+                                    onRevealShell={props.onRevealShell}
+                                  />
+                                </div>
+                              )}
+                            </Show>
+                          }
+                        >
+                          {(part) => (
+                            <div data-slot="context-tool-group-item">
+                              <AssistantReasoningContent
+                                id={part().id}
+                                content={part()}
+                                streaming={part().streaming ?? false}
+                                defaultOpen={props.reasoningDefaultOpen}
+                                open={props.reasoningOpen?.(part().id)}
+                                onOpenChange={(open) => props.onReasoningOpenChange?.(part().id, open)}
+                                onContentRendered={props.onSizeChange}
+                              />
+                            </div>
+                          )}
+                        </Show>
+                      }
+                    >
+                      {(group) => (
+                        <div data-slot="context-tool-group-item">
+                          <GroupItem
+                            tools={group()}
+                            patchKey={patchKeys().get(group()[0]!)}
+                            onSizeChange={props.onSizeChange}
+                            toolDefaultOpen={props.toolDefaultOpen}
+                            toolOpen={props.toolOpen}
+                            onToolOpenChange={props.onToolOpenChange}
+                            fileOpen={props.fileOpen}
+                            onFileOpenChange={props.onFileOpenChange}
+                          />
+                        </div>
+                      )}
+                    </Show>
+                  )
+                }}
+              </Index>
+            </div>
+          </BasicTool>
         </div>
       </Show>
     </Show>
